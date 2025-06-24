@@ -25,7 +25,7 @@ ee.Initialize(ee.ServiceAccountCredentials(creds['client_email'], KEY))
 
 # Define AOI and time window
 geom = ee.Geometry.BBox(36.2597202470, 4.19477694745, 36.3308408646, 4.26022461625)
-time_start, time_end = '2025-06-01', '2025-06-14'
+time_start, time_end = '2025-06-05', '2025-06-19'
 NDVI_THRESH = 0.3
 AREA_MIN = 10000  # m²
 
