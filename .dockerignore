@@ -1,0 +1,20 @@
+# Ignore Docker and Git files
+Dockerfile
+.dockerignore
+.git
+.gitignore
+
+# Ignore Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+*.egg-info/
+
+# IMPORTANT: Ignore secrets and local output
+my-secret-key.json
+output/
+non_docker/
+makefile
+README.MD

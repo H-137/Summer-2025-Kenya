@@ -1,17 +1,16 @@
 # NDVI Collection for Pastoralists in Kenya
 
-Using Google Earth Engine, Sentinel 2 data is collected and maintained within a given boundary of land.
+This github contains the backend for pulling GEE data and sending NDVI polygons to users.
 
 ## Install
 
 ```
-pip install -r requirements.txt
+make build
 ```
 
-## Maintenance
-To update `requirements.txt`:
+## When starting docker
 ```
-make
+make run
 ```
 
 ## License

@@ -136,7 +136,7 @@ for f in geojson['features']:
 
 # Create DataFrame and export
 df = pd.DataFrame(rows)
-df.to_csv('ndvi_polygons.csv', index=False)
+df.to_csv('output/ndvi_polygons.csv', index=False)
 print("Exported to ndvi_polygons.csv")
 # Print execution time
 end_time = time.time()
