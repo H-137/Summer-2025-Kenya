@@ -28,6 +28,13 @@ run:
 		-v "$(shell pwd)/output:/app/output" \
 		$(IMAGE_NAME)
 
+run_sample:
+	@echo "--> Running Docker container with sample data..."
+	@docker run --rm \
+		-v "$(shell pwd)/my-secret-key.json:/app/my-secret-key.json:ro" \
+		-v "$(shell pwd)/output:/app/output" \
+		$(IMAGE_NAME) 36.2597202470 4.19477694745 36.3308408646 4.26022461625 2025-06-05 2025-06-19 10000
+
 # A 'clean' target is a helpful convention for removing generated files.
 clean:
 	@echo "--> Removing generated CSV file..."

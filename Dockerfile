@@ -32,4 +32,4 @@ COPY ./app /app
 RUN mkdir /app/output
 
 # 8. Define the command to run when the container starts
-CMD ["python", "export_ndvi.py"]
+ENTRYPOINT ["python", "export_ndvi.py"]
