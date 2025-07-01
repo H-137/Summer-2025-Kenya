@@ -1,0 +1,21 @@
+version: '3.9'
+
+services:
+  backend:
+    build:
+      context: .
+    container_name: fastapi-backend
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/ee-creds.json
+      TEXTSMS_CREDENTIALS_PATH: /run/secrets/textsms-creds.json
+    volumes:
+      - ./secrets/ee-creds.json:/run/secrets/ee-creds.json:ro
+      - ./secrets/textsms-creds.json:/run/secrets/textsms-creds.json:ro
+    # No ports exposed here, access only through Docker network
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflare-tunnel
+    depends_on:
+      - backend
+    command: tunnel --url http://fastapi-backend:5001 --protocol http2

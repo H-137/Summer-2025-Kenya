@@ -17,16 +17,13 @@ build:
 	@echo "--> Updating requirements.txt..."
 	@pip freeze > requirements.txt
 	@echo "--> Building Docker image: $(IMAGE_NAME)"
-	@docker build -t $(IMAGE_NAME) .
+	docker compose build
 
 # Run the Docker container to generate the CSV file.
 # I renamed this from 'start_docker' to 'run' for convention.
 run:
 	@echo "--> Running Docker container..."
-	@docker run --rm \
-		-v "$(shell pwd)/my-secret-key.json:/app/my-secret-key.json:ro" \
-		-v "$(shell pwd)/output:/app/output" \
-		$(IMAGE_NAME)
+	docker compose up
 
 run_sample:
 	@echo "--> Running Docker container with sample data..."

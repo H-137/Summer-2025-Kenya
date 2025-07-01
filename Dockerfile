@@ -7,9 +7,6 @@ ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
 
 # 3. Install required system dependencies
-# - g++ is a compiler needed for some Python packages.
-# - libgdal-dev provides the core geospatial libraries (GDAL).
-# We combine all 'apt-get' commands into one layer to keep the image smaller.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     g++ \
@@ -21,7 +18,6 @@ RUN apt-get update && \
 WORKDIR /app
 
 # 5. Copy and install Python requirements
-# This uses the 'pip' that comes with the Python 3.12 image.
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
@@ -29,7 +25,7 @@ RUN python -m pip install --no-cache-dir -r requirements.txt
 COPY ./app /app
 
 # 7. Create the output directory inside the container
-RUN mkdir /app/output
+RUN mkdir -p /app/output
 
 # 8. Define the command to run when the container starts
-ENTRYPOINT ["python", "export_ndvi.py"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5001"]

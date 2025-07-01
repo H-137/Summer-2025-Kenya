@@ -1,47 +1,43 @@
 import ee
 import json
-import pandas as pd
-import time
 import geopandas as gpd
 from shapely.geometry import shape
-import sys 
+import pandas as pd
+import time
+import os
 
-if __name__ == "__main__":
-    print("Starting NDVI export script...")
+def run_ndvi_export(minLon, minLat, maxLon, maxLat, start_date, end_date, min_area, key_path=None):
     start_time = time.time()
 
-    # Constants for cloud masking
-    CLD_THRESH = 50  # max CLOUDY_PIXEL_PERCENTAGE allowed
-    CLD_PRB_THRESH = 60  # probability threshold for cloud detection
-    NIR_DRK_THRESH = 0.15  # dark pixels threshold (B8 < 0.15)
-    CLD_PRJ_DIST = 1  # km distance for shadow projection
-    BUFFER = 50  # distance in meters to dilate cloud/shadow mask
-    NUM_RESULTS = 10 # number of largest polygons to return
-
-    # Authenticate and initialize Earth Engine
-    KEY = 'my-secret-key.json'  # Replace with path to your GEE service account JSON
-    with open(KEY, 'r') as f:
+    # Initialize Earth Engine
+    if key_path is None:
+        key_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "ee-key.json")
+    with open(key_path, 'r') as f:
         creds = json.load(f)
+    ee.Initialize(ee.ServiceAccountCredentials(creds['client_email'], key_path))
 
-    ee.Initialize(ee.ServiceAccountCredentials(creds['client_email'], KEY))
-
-    # Define AOI and time window
-    # Get bbox coordinates passed from the user
-    bbox = [float(sys.argv[1]), float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])]
-    geom = ee.Geometry.BBox(*bbox)
-    time_start, time_end = sys.argv[5], sys.argv[6]  # Start and end dates in 'YYYY-MM-DD' format
+    # Constants
+    CLD_THRESH = 50
+    CLD_PRB_THRESH = 60
+    NIR_DRK_THRESH = 0.15
+    CLD_PRJ_DIST = 1
+    BUFFER = 50
+    NUM_RESULTS = 10
     NDVI_THRESH = 0.3
-    AREA_MIN = float(sys.argv[7])  # m²
 
-    # Cloud masking helpers
+    bbox = [float(minLon), float(minLat), float(maxLon), float(maxLat)]
+    geom = ee.Geometry.BBox(*bbox)
+    AREA_MIN = float(min_area)
+
+    # Helper functions (same as before, omitted here for brevity)
     def get_s2_sr_cld_col(aoi, start_date, end_date):
         s2_sr = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
-                .filterBounds(aoi)
-                .filterDate(start_date, end_date)
-                .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', CLD_THRESH)))
+                 .filterBounds(aoi)
+                 .filterDate(start_date, end_date)
+                 .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', CLD_THRESH)))
         s2_cld = (ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY')
-                .filterBounds(aoi)
-                .filterDate(start_date, end_date))
+                  .filterBounds(aoi)
+                  .filterDate(start_date, end_date))
         return ee.ImageCollection(ee.Join.saveFirst('s2cloudless').apply(**{
             'primary': s2_sr,
             'secondary': s2_cld,
@@ -69,24 +65,18 @@ if __name__ == "__main__":
         img_cloud_shadow = add_shadow_bands(img_cloud)
         is_cld_shdw = img_cloud_shadow.select('clouds').add(img_cloud_shadow.select('shadows')).gt(0)
         is_cld_shdw = (is_cld_shdw.focalMin(2).focalMax(BUFFER * 2 / 20)
-                    .reproject(crs=img.select([0]).projection(), scale=20)
-                    .rename('cloudmask'))
+                       .reproject(crs=img.select([0]).projection(), scale=20)
+                       .rename('cloudmask'))
         return img_cloud_shadow.addBands(is_cld_shdw)
 
     def apply_cld_shdw_mask(img):
         return img.updateMask(img.select('cloudmask').Not())
 
-    # Apply cloud/shadow masking
-    s2_sr_cld_col = get_s2_sr_cld_col(geom, time_start, time_end)
+    # Processing
+    s2_sr_cld_col = get_s2_sr_cld_col(geom, start_date, end_date)
     masked_col = s2_sr_cld_col.map(add_cld_shdw_mask).map(apply_cld_shdw_mask)
-
-    # Create cloud-free mosaic by most recent
     image = masked_col.median().clip(geom)
-
-    # Calculate NDVI
     ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI')
-
-    # Threshold NDVI and extract vectors
     ndvi_mask = ndvi.gt(NDVI_THRESH).toInt()
 
     vectors = (ndvi_mask.reduceToVectors(
@@ -97,11 +87,10 @@ if __name__ == "__main__":
         maxPixels=1e13
     ).map(lambda f: f.set('area', f.geometry().area(1))))
 
+    vectors = vectors.filter(ee.Filter.gte('area', AREA_MIN))
     vectors = vectors.filter(ee.Filter.lt('area', 1e7))
+    vectors = vectors.sort('area', False).limit(NUM_RESULTS)
 
-    vectors = vectors.sort('area', False).limit(NUM_RESULTS)  # Sort by area, largest first
-
-    # Calculate mean NDVI in each polygon
     def add_mean_ndvi(feature):
         mean = ndvi.reduceRegion(
             reducer=ee.Reducer.mean(),
@@ -112,36 +101,37 @@ if __name__ == "__main__":
         return feature.set('mean_ndvi', mean)
 
     features_with_ndvi = vectors.map(add_mean_ndvi)
-
-    # Export GeoJSON FeatureCollection to Python
     geojson = features_with_ndvi.getInfo()
 
-    # Convert to DataFrame
-    rows = []
+    results = []
     for f in geojson['features']:
         props = f['properties']
-        
-        # Clean and round mean NDVI
-        ndvi_val = props.get('mean_ndvi')
-        props['mean_ndvi'] = round(float(ndvi_val), 2) if ndvi_val is not None else None
+        mean_ndvi = props.get('mean_ndvi')
+        area = props.get('area')
 
-        # Round area (convert m² to ha or km² as needed)
-        area_val = props.get('area')
-        props['area'] = round(area_val / 10000, 2) if area_val is not None else None
+        # Simplify geometry
+        geom_shape = shape(f['geometry'])
+        simplified_geom = geom_shape.simplify(tolerance=0.0001, preserve_topology=True)
 
-        # Remove unnecessary keys
-        props.pop('count', None)
-        props.pop('ndvi_zone', None)
+        results.append({
+            'mean_ndvi': round(float(mean_ndvi), 2) if mean_ndvi is not None else None,
+            'area_ha': round(area / 10000, 2) if area is not None else None,
+            'geometry': json.loads(gpd.GeoSeries([simplified_geom]).to_json())['features'][0]['geometry']
+        })
 
-        geom = shape(f['geometry'])  # Convert to shapely geometry
-        simplified_geom = geom.simplify(tolerance=0.0001, preserve_topology=True)
-        props['geometry'] = json.dumps(gpd.GeoSeries([simplified_geom]).__geo_interface__['features'][0]['geometry'])
-        rows.append(props)
+    duration = time.time() - start_time
+    return {
+        'count': len(results),
+        'results': results,
+        'duration_seconds': duration
+    }
 
-    # Create DataFrame and export
-    df = pd.DataFrame(rows)
-    df.to_csv('output/ndvi_polygons.csv', index=False)
-    print("Exported to ndvi_polygons.csv")
-    # Print execution time
-    end_time = time.time()
-    print(f"Script completed in {end_time - start_time:.2f} seconds.")
+# For debugging: allow running standalone
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) != 8:
+        print("Usage: python export_ndvi.py minLon minLat maxLon maxLat start_date end_date min_area")
+        sys.exit(1)
+
+    output = run_ndvi_export(*sys.argv[1:])
+    print(json.dumps(output, indent=2))
