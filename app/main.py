@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from pprint import pprint
 
 import requests
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -66,6 +67,8 @@ async def run_ndvi_and_notify(request: NdviRequest):
         request.end_date,
         request.min_area,
     )
+
+    pprint(ndvi_result)
 
     # Compose SMS message with summary
     count = ndvi_result["count"]

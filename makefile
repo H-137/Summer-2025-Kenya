@@ -25,12 +25,17 @@ run:
 	@echo "--> Running Docker container..."
 	docker compose up
 
-run_sample:
-	@echo "--> Running Docker container with sample data..."
-	@docker run --rm \
-		-v "$(shell pwd)/my-secret-key.json:/app/my-secret-key.json:ro" \
-		-v "$(shell pwd)/output:/app/output" \
-		$(IMAGE_NAME) 36.2597202470 4.19477694745 36.3308408646 4.26022461625 2025-06-05 2025-06-19 10000
+run_sample_export:
+	@echo "Running sample export..."
+	python app/export_ndvi.py -76 38 -75.9 38.1 2025-06-23 2025-07-07 10000 secrets/ee-creds.json
+
+run_sample_api_call:
+	@echo "--> Executing sample POST request to the Docker container..."
+	python test_script.py
+
+start_html:
+	@echo "--> Starting HTML server..."
+	python -m http.server 5001
 
 # A 'clean' target is a helpful convention for removing generated files.
 clean:

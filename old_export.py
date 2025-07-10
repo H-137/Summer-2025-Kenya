@@ -1,11 +1,10 @@
 import ee
 import json
 import geopandas as gpd
-from shapely.geometry import shape, Polygon
+from shapely.geometry import shape
 import pandas as pd
 import time
 import os
-from pyproj import Transformer, CRS
 
 def run_ndvi_export(minLon, minLat, maxLon, maxLat, start_date, end_date, min_area, key_path=None):
     start_time = time.time()
@@ -29,12 +28,8 @@ def run_ndvi_export(minLon, minLat, maxLon, maxLat, start_date, end_date, min_ar
     bbox = [float(minLon), float(minLat), float(maxLon), float(maxLat)]
     geom = ee.Geometry.BBox(*bbox)
     AREA_MIN = float(min_area)
-    
-    center_lon = (float(minLon) + float(maxLon)) / 2
-    center_lat = (float(minLat) + float(maxLat)) / 2
-    ref_point = (center_lon, center_lat)
 
-    # Cloud and shadow filtering
+    # Helper functions (same as before, omitted here for brevity)
     def get_s2_sr_cld_col(aoi, start_date, end_date):
         s2_sr = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
                  .filterBounds(aoi)
@@ -77,45 +72,6 @@ def run_ndvi_export(minLon, minLat, maxLon, maxLat, start_date, end_date, min_ar
     def apply_cld_shdw_mask(img):
         return img.updateMask(img.select('cloudmask').Not())
 
-    def get_utm_crs(lon, lat):
-        utm_zone = int((lon + 180) / 6) + 1
-        is_northern = lat >= 0
-        return CRS.from_epsg(32600 + utm_zone) if is_northern else CRS.from_epsg(32700 + utm_zone)
-
-    def snap_geometry_to_grid(geom, ref_point, spacing=100):
-        utm_crs = get_utm_crs(*ref_point)
-        transformer_to_utm = Transformer.from_crs("epsg:4326", utm_crs, always_xy=True)
-        transformer_from_utm = Transformer.from_crs(utm_crs, "epsg:4326", always_xy=True)
-
-        def snap_coords(coords):
-            snapped = []
-            for x, y in coords:
-                xm, ym = transformer_to_utm.transform(x, y)
-                x_refm, y_refm = transformer_to_utm.transform(*ref_point)
-                dx = round((xm - x_refm) / spacing) * spacing
-                dy = round((ym - y_refm) / spacing) * spacing
-                snapped_x, snapped_y = transformer_from_utm.transform(x_refm + dx, y_refm + dy)
-                snapped.append((snapped_x, snapped_y))
-            return snapped
-
-        if isinstance(geom, Polygon):
-            return Polygon(snap_coords(geom.exterior.coords))
-
-        return geom
-
-    def polygon_to_offsets(polygon: Polygon, ref_point, spacing=100):
-        utm_crs = get_utm_crs(*ref_point)
-        transformer_to_utm = Transformer.from_crs("epsg:4326", utm_crs, always_xy=True)
-        ref_x, ref_y = transformer_to_utm.transform(*ref_point)
-
-        offsets = []
-        for x, y in polygon.exterior.coords:
-            xm, ym = transformer_to_utm.transform(x, y)
-            dx = round((xm - ref_x) / spacing)
-            dy = round((ym - ref_y) / spacing)
-            offsets.append([dx, dy])
-        return offsets
-
     # Processing
     s2_sr_cld_col = get_s2_sr_cld_col(geom, start_date, end_date)
     masked_col = s2_sr_cld_col.map(add_cld_shdw_mask).map(apply_cld_shdw_mask)
@@ -153,14 +109,14 @@ def run_ndvi_export(minLon, minLat, maxLon, maxLat, start_date, end_date, min_ar
         mean_ndvi = props.get('mean_ndvi')
         area = props.get('area')
 
-        geom_shape = shape(f['geometry']).simplify(tolerance=0.0001, preserve_topology=True)
-        snapped_geom = snap_geometry_to_grid(geom_shape, ref_point)
+        # Simplify geometry
+        geom_shape = shape(f['geometry'])
+        simplified_geom = geom_shape.simplify(tolerance=0.0001, preserve_topology=True)
 
         results.append({
-            'ref_point': [ref_point[0], ref_point[1]],
             'mean_ndvi': round(float(mean_ndvi), 2) if mean_ndvi is not None else None,
             'area_ha': round(area / 10000, 2) if area is not None else None,
-            'offsets_100m': polygon_to_offsets(snapped_geom, ref_point)
+            'geometry': json.loads(gpd.GeoSeries([simplified_geom]).to_json())['features'][0]['geometry']
         })
 
     duration = time.time() - start_time
@@ -178,7 +134,5 @@ if __name__ == "__main__":
         sys.exit(1)
 
     output = run_ndvi_export(*sys.argv[1:])
+    print(json.dumps(output, indent=2))
     pd.DataFrame(output['results']).to_csv('ndvi_results.csv', index=False)
-    print(f"Exported {output['count']} results to ndvi_results.csv in {output['duration_seconds']} seconds.")
-
-
