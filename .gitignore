@@ -2,3 +2,4 @@
 secrets
 secrets/*
 non_docker/
+.cloudflared/

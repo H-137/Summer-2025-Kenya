@@ -1,13 +1,11 @@
 import ee
 import json
+import geopandas as gpd
 from shapely.geometry import shape, Polygon
-from pyproj import Transformer, CRS
-import struct
-import base64
-import zlib
+import pandas as pd
 import time
 import os
-
+from pyproj import Transformer, CRS
 
 def run_ndvi_export(minLon, minLat, maxLon, maxLat, start_date, end_date, min_area, key_path=None):
     start_time = time.time()
@@ -31,14 +29,12 @@ def run_ndvi_export(minLon, minLat, maxLon, maxLat, start_date, end_date, min_ar
     bbox = [float(minLon), float(minLat), float(maxLon), float(maxLat)]
     geom = ee.Geometry.BBox(*bbox)
     AREA_MIN = float(min_area)
-
+    
     center_lon = (float(minLon) + float(maxLon)) / 2
     center_lat = (float(minLat) + float(maxLat)) / 2
     ref_point = (center_lon, center_lat)
 
-    # Cloud and shadow filtering functions omitted here for brevity...
-    # Paste your existing cloud/shadow functions here exactly as before.
-
+    # Cloud and shadow filtering
     def get_s2_sr_cld_col(aoi, start_date, end_date):
         s2_sr = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
                  .filterBounds(aoi)
@@ -82,11 +78,13 @@ def run_ndvi_export(minLon, minLat, maxLon, maxLat, start_date, end_date, min_ar
         return img.updateMask(img.select('cloudmask').Not())
 
     def get_utm_crs(lon, lat):
-        if 33 <= lon < 39:
-            zone = 36
-        else:
-            zone = 37
-        return CRS.from_epsg(32600 + zone)
+            # Kenya mostly lies in zone 37N (EPSG:32637)
+            # Optionally support zone 36N for far western Kenya
+            if 33 <= lon < 39:
+                zone = 36
+            else:
+                zone = 37
+            return CRS.from_epsg(32600 + zone)
 
     def snap_geometry_to_grid(geom, ref_point, spacing=100):
         utm_crs = get_utm_crs(*ref_point)
@@ -122,7 +120,7 @@ def run_ndvi_export(minLon, minLat, maxLon, maxLat, start_date, end_date, min_ar
             offsets.append([dx, dy])
         return offsets
 
-    # Process Sentinel-2 data as before
+    # Processing
     s2_sr_cld_col = get_s2_sr_cld_col(geom, start_date, end_date)
     masked_col = s2_sr_cld_col.map(add_cld_shdw_mask).map(apply_cld_shdw_mask)
     image = masked_col.median().clip(geom)
@@ -156,136 +154,35 @@ def run_ndvi_export(minLon, minLat, maxLon, maxLat, start_date, end_date, min_ar
     results = []
     for f in geojson['features']:
         props = f['properties']
-        mean_ndvi = props.get('mean_ndvi', 0.0)
-        area = props.get('area', 0.0)
+        mean_ndvi = props.get('mean_ndvi')
+        area = props.get('area')
 
         geom_shape = shape(f['geometry']).simplify(tolerance=0.0001, preserve_topology=True)
         snapped_geom = snap_geometry_to_grid(geom_shape, ref_point)
 
-        offsets = polygon_to_offsets(snapped_geom, ref_point)
         results.append({
-            'mean_ndvi': float(mean_ndvi),
-            'area_ha': area / 10000,
-            'offsets': offsets
-        })
+            'ref_point': [ref_point[0], ref_point[1]],
+            'mean_ndvi': round(float(mean_ndvi), 2) if mean_ndvi is not None else None,
+            'area_ha': round(area / 10000, 2) if area is not None else None,
+            'offsets_100m': polygon_to_offsets(snapped_geom, ref_point)
+        })   
 
-    compressed_str = encode_ndvi_data_advanced(ref_point, results)
     duration = time.time() - start_time
-
     return {
-        'compressed': compressed_str,
+        'count': len(results),
+        'results': results,
         'duration_seconds': duration
     }
 
-
-def encode_ndvi_data_advanced(ref_point, features):
-    """
-    Fixed-point, delta offsets, zlib compress, base85 encode
-    """
-    data = bytearray()
-    # Pack ref_point as 2 floats (8 bytes)
-    data.extend(struct.pack('>2f', *ref_point))
-    # Number of features (unsigned short)
-    data.extend(struct.pack('>H', len(features)))
-
-    for feat in features:
-        # Fixed-point encoding for mean_ndvi and area_ha
-        mean_int = int(round(feat['mean_ndvi'] * 1000))  # 0-1000
-        area_int = int(round(feat['area_ha'] * 10))       # scale area by 10
-        data.extend(struct.pack('>HH', mean_int, area_int))
-
-        offsets = feat['offsets']
-        # Number of offset points
-        data.extend(struct.pack('>H', len(offsets)))
-
-        if not offsets:
-            continue
-
-        # Delta encode offsets
-        prev_dx, prev_dy = offsets[0]
-        data.extend(struct.pack('>2h', prev_dx, prev_dy))  # absolute first point
-
-        for dx, dy in offsets[1:]:
-            delta_dx = dx - prev_dx
-            delta_dy = dy - prev_dy
-            # Zig-zag encoding to handle signed deltas efficiently
-            zz_dx = (delta_dx << 1) ^ (delta_dx >> 15)
-            zz_dy = (delta_dy << 1) ^ (delta_dy >> 15)
-            # Store as unsigned shorts
-            data.extend(struct.pack('>HH', zz_dx, zz_dy))
-            prev_dx, prev_dy = dx, dy
-
-    # Compress with zlib
-    compressed = zlib.compress(data)
-    # Encode with base85
-    encoded = base64.b85encode(compressed).decode('ascii')
-    return encoded
-
-
-def decode_ndvi_data_advanced(encoded_str):
-    """
-    Decode advanced compressed base85 string back to structured data
-    """
-    compressed = base64.b85decode(encoded_str)
-    data = zlib.decompress(compressed)
-
-    pos = 0
-    ref_point = struct.unpack('>2f', data[pos:pos+8])
-    pos += 8
-    count, = struct.unpack('>H', data[pos:pos+2])
-    pos += 2
-
-    features = []
-    for _ in range(count):
-        mean_int, area_int = struct.unpack('>HH', data[pos:pos+4])
-        pos += 4
-        mean_ndvi = mean_int / 1000.0
-        area_ha = area_int / 10.0
-
-        n_offsets, = struct.unpack('>H', data[pos:pos+2])
-        pos += 2
-
-        offsets = []
-        if n_offsets > 0:
-            # Read absolute first point
-            dx, dy = struct.unpack('>2h', data[pos:pos+4])
-            pos += 4
-            offsets.append([dx, dy])
-
-            prev_dx, prev_dy = dx, dy
-            for __ in range(n_offsets - 1):
-                zz_dx, zz_dy = struct.unpack('>HH', data[pos:pos+4])
-                pos += 4
-                # Decode zig-zag
-                delta_dx = (zz_dx >> 1) ^ (-(zz_dx & 1))
-                delta_dy = (zz_dy >> 1) ^ (-(zz_dy & 1))
-                dx = prev_dx + delta_dx
-                dy = prev_dy + delta_dy
-                offsets.append([dx, dy])
-                prev_dx, prev_dy = dx, dy
-
-        features.append({
-            'mean_ndvi': mean_ndvi,
-            'area_ha': area_ha,
-            'offsets': offsets
-        })
-
-    return {'ref_point': ref_point, 'features': features}
-
-
+# For debugging: allow running standalone
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) < 8:
-        print("Usage: python export_ndvi_compressed_advanced.py minLon minLat maxLon maxLat start_date end_date min_area [key_path]")
+    if len(sys.argv) != 9:
+        print("Usage: python export_ndvi.py minLon minLat maxLon maxLat start_date end_date min_area key_path")
         sys.exit(1)
 
-    key_path = sys.argv[8] if len(sys.argv) > 8 else None
-    output = run_ndvi_export(*sys.argv[1:8], key_path)
+    output = run_ndvi_export(*sys.argv[1:])
+    pd.DataFrame(output['results']).to_csv('ndvi_results.csv', index=False)
+    print(f"Exported {output['count']} results to ndvi_results.csv in {output['duration_seconds']} seconds.")
 
-    # Save compressed string to ndvi.txt
-    with open("ndvi.txt", "w") as f:
-        f.write(output['compressed'])
-
-    print(f"Compressed NDVI string saved to ndvi.txt")
-    print(f"Duration: {output['duration_seconds']:.2f} seconds")
 

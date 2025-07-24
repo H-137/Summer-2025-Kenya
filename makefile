@@ -27,7 +27,7 @@ run:
 
 run_sample_export:
 	@echo "Running sample export..."
-	python app/export_ndvi.py -76 38 -75.9 38.1 2025-06-23 2025-07-07 10000 secrets/ee-creds.json
+	python app/export_ndvi.py 36.7769 -1.3371 36.8669 -1.2471 2025-06-10 2025-07-01 10000 secrets/ee-creds.json
 
 run_sample_api_call:
 	@echo "--> Executing sample POST request to the Docker container..."

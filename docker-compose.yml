@@ -11,11 +11,12 @@ services:
     volumes:
       - ./secrets/ee-creds.json:/run/secrets/ee-creds.json:ro
       - ./secrets/textsms-creds.json:/run/secrets/textsms-creds.json:ro
-    # No ports exposed here, access only through Docker network
 
   tunnel:
     image: cloudflare/cloudflared:latest
     container_name: cloudflare-tunnel
     depends_on:
       - backend
-    command: tunnel --url http://fastapi-backend:5001 --protocol http2
+    command: tunnel run Kenya
+    volumes:
+      - ./.cloudflared:/etc/cloudflared

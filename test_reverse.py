@@ -1,63 +1,102 @@
+import struct
+import base64
+import zlib
+import json
+from shapely.geometry import Polygon, mapping
 from pyproj import Transformer, CRS
-from shapely.geometry import Polygon
 import pandas as pd
-import ast
+
+def decode_ndvi_data_advanced(encoded_str):
+    compressed = base64.b85decode(encoded_str)
+    data = zlib.decompress(compressed)
+
+    pos = 0
+    ref_point = struct.unpack('>2f', data[pos:pos+8])
+    pos += 8
+    count, = struct.unpack('>H', data[pos:pos+2])
+    pos += 2
+
+    features = []
+    for _ in range(count):
+        mean_int, area_int = struct.unpack('>HH', data[pos:pos+4])
+        pos += 4
+        mean_ndvi = mean_int / 1000.0
+        area_ha = area_int / 10.0
+
+        n_offsets, = struct.unpack('>H', data[pos:pos+2])
+        pos += 2
+
+        offsets = []
+        if n_offsets > 0:
+            dx, dy = struct.unpack('>2h', data[pos:pos+4])
+            pos += 4
+            offsets.append([dx, dy])
+
+            prev_dx, prev_dy = dx, dy
+            for __ in range(n_offsets - 1):
+                zz_dx, zz_dy = struct.unpack('>HH', data[pos:pos+4])
+                pos += 4
+                delta_dx = (zz_dx >> 1) ^ (-(zz_dx & 1))
+                delta_dy = (zz_dy >> 1) ^ (-(zz_dy & 1))
+                dx = prev_dx + delta_dx
+                dy = prev_dy + delta_dy
+                offsets.append([dx, dy])
+                prev_dx, prev_dy = dx, dy
+
+        features.append({
+            'mean_ndvi': mean_ndvi,
+            'area_ha': area_ha,
+            'offsets': offsets
+        })
+
+    return {'ref_point': ref_point, 'features': features}
 
 def get_utm_crs(lon, lat):
-    utm_zone = int((lon + 180) / 6) + 1
-    is_northern = lat >= 0
-    return CRS.from_epsg(32600 + utm_zone) if is_northern else CRS.from_epsg(32700 + utm_zone)
+    if 33 <= lon < 39:
+        zone = 36
+    else:
+        zone = 37
+    return CRS.from_epsg(32600 + zone)
 
-def offsets_to_polygon(offsets, ref_point, spacing=100):
-    """
-    Converts a list of 100m-spaced offsets back into a Shapely Polygon in EPSG:4326.
-    
-    Parameters:
-        offsets (List[List[int]]): List of [dx, dy] grid offsets from the reference point.
-        ref_point (Tuple[float, float]): Reference point (longitude, latitude).
-        spacing (int): Spacing in meters (default is 100m).
+def offsets_to_polygon(ref_point, offsets, spacing=100):
+    if not offsets:
+        return None
 
-    Returns:
-        Polygon: A Shapely polygon in lat/lon (EPSG:4326).
-    """
     utm_crs = get_utm_crs(*ref_point)
     transformer_to_utm = Transformer.from_crs("epsg:4326", utm_crs, always_xy=True)
     transformer_from_utm = Transformer.from_crs(utm_crs, "epsg:4326", always_xy=True)
 
     ref_x, ref_y = transformer_to_utm.transform(*ref_point)
-    coords = []
-    for point in offsets:
-        try:
-            dx, dy = point[0], point[1]
-            x = ref_x + dx * spacing
-            y = ref_y + dy * spacing
-            lon, lat = transformer_from_utm.transform(x, y)
-            coords.append((lon, lat))
-        except Exception as e:
-            print(f"Error processing point {point}: {e}")
-            continue
 
-    # Ensure the polygon is closed
-    if coords[0] != coords[-1]:
-        coords.append(coords[0])
+    coords_utm = [(ref_x + dx * spacing, ref_y + dy * spacing) for dx, dy in offsets]
+    coords_lonlat = [transformer_from_utm.transform(x, y) for x, y in coords_utm]
 
-    return Polygon(coords)
+    if coords_lonlat[0] != coords_lonlat[-1]:
+        coords_lonlat.append(coords_lonlat[0])
+
+    return Polygon(coords_lonlat)
+
+def decode_to_csv(encoded_str, output_csv_path='ndvi_results.csv'):
+    data = decode_ndvi_data_advanced(encoded_str)
+    ref_point = data['ref_point']
+    features = data['features']
+
+    rows = []
+    for feat in features:
+        polygon = offsets_to_polygon(ref_point, feat['offsets'])
+        geom_json = json.dumps(mapping(polygon)) if polygon else None
+        rows.append({
+            'ref_point': json.dumps([round(ref_point[0],6), round(ref_point[1],6)]),
+            'mean_ndvi': round(feat['mean_ndvi'], 3),
+            'area_ha': round(feat['area_ha'], 3),
+            'geometry': geom_json
+        })
+
+    df = pd.DataFrame(rows)
+    df.to_csv(output_csv_path, index=False)
+    print(f"Decoded data saved to {output_csv_path}")
 
 if __name__ == "__main__":
-    # open csv and read offsets_100m
-    df = pd.read_csv('ndvi_results.csv')
-    df['geometry'] = None
-    for index, row in df.iterrows():
-        offsets = ast.literal_eval(row['offsets_100m'])
-        ref_point = ast.literal_eval(row['ref_point'])
-        polygon = offsets_to_polygon(offsets, ref_point)
-        # coordinates to polygon geojson
-        geojson = {
-            "type": "Polygon",
-            "coordinates": [list(polygon.exterior.coords)]
-        }
-        df.at[index, 'geometry'] = geojson
-    df = df.drop('offsets_100m', axis=1)
-    # save to new csv
-    df.to_csv('ndvi_polygons.csv', index=False)
-
+    with open("ndvi.txt", 'r') as f:
+        encoded_str = f.read().strip()
+    decode_to_csv(encoded_str)
